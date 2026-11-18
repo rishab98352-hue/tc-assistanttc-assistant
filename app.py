@@ -49,11 +49,24 @@ def build_vector_index():
     if not chunks:
         return None, []
     
+    # Reuse saved FAISS index if chunk count hasn't changed (0.2s startup)
+    if os.path.exists("faiss_index.bin") and os.path.exists("faiss_count.txt"):
+        try:
+            with open("faiss_count.txt", "r") as f:
+                saved_count = int(f.read().strip())
+            if saved_count == len(chunks):
+                return faiss.read_index("faiss_index.bin"), chunks
+        except Exception:
+            pass
+
     embedder = load_embedder()
-    matrix = embedder.encode(chunks, convert_to_numpy=True).astype("float32")
+    matrix = embedder.encode(chunks, batch_size=64, convert_to_numpy=True).astype("float32")
     
     index = faiss.IndexFlatL2(matrix.shape[1])
     index.add(matrix)
+    faiss.write_index(index, "faiss_index.bin")
+    with open("faiss_count.txt", "w") as f:
+        f.write(str(len(chunks)))
     return index, chunks
 
 with st.sidebar:
