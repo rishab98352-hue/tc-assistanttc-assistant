@@ -1,9 +1,9 @@
 import os
-import time
 import numpy as np
 import faiss
 import streamlit as st
 from google import genai
+from sentence_transformers import SentenceTransformer
 from drive_sync import fetch_and_chunk_files
 
 st.set_page_config(page_title="T&C Field Assistant", page_icon="⚡", layout="centered")
@@ -15,45 +15,28 @@ client = genai.Client(api_key=api_key)
 FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
 
 @st.cache_resource(show_spinner=False)
+def load_embedder():
+    return SentenceTransformer("all-MiniLM-L6-v2")
+
+@st.cache_resource(show_spinner=False)
 def build_vector_index():
     progress_bar = st.progress(0, text="Connecting to Google Drive...")
     
     def update_progress(pct, msg):
-        progress_bar.progress(min(pct * 0.7, 0.7), text=msg)
+        progress_bar.progress(min(pct * 0.75, 0.75), text=msg)
 
-    chunks = fetch_and_chunk_files(FOLDER_ID, client, progress_callback=update_progress, chunk_size=2500, overlap=250)
+    chunks = fetch_and_chunk_files(FOLDER_ID, progress_callback=update_progress, chunk_size=2000, overlap=250)
     if not chunks:
         progress_bar.empty()
         return None, []
     
-    embeddings = []
-    batch_size = 80
-    total_chunks = len(chunks)
-    for i in range(0, total_chunks, batch_size):
-        pct = 0.7 + (0.3 * (i / max(total_chunks, 1)))
-        progress_bar.progress(min(pct, 0.99), text=f"Indexing knowledge chunks ({min(i + batch_size, total_chunks)}/{total_chunks})...")
-        batch = chunks[i:i + batch_size]
-        while True:
-            try:
-                res = client.models.embed_content(
-                    model="gemini-embedding-001",
-                    contents=batch
-                )
-                for emb in res.embeddings:
-                    embeddings.append(emb.values)
-                break
-            except Exception as e:
-                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    progress_bar.progress(min(pct, 0.99), text="Free-tier rate limit pause (waiting 30s)...")
-                    time.sleep(30)
-                else:
-                    progress_bar.empty()
-                    raise e
+    progress_bar.progress(0.85, text=f"Building instant search index for {len(chunks)} chunks...")
+    embedder = load_embedder()
+    matrix = embedder.encode(chunks, convert_to_numpy=True).astype("float32")
     
-    progress_bar.empty()
-    matrix = np.array(embeddings, dtype="float32")
     index = faiss.IndexFlatL2(matrix.shape[1])
     index.add(matrix)
+    progress_bar.empty()
     return index, chunks
 
 with st.sidebar:
@@ -65,7 +48,7 @@ with st.sidebar:
 try:
     index, chunks = build_vector_index()
 except Exception as e:
-    st.error(f"API Error details: {e}")
+    st.error(f"Error details: {e}")
     st.stop()
 
 if not chunks:
@@ -84,11 +67,8 @@ if prompt := st.chat_input("e.g., What is the trip logic or terminal number for 
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    q_res = client.models.embed_content(
-        model="gemini-embedding-001",
-        contents=prompt
-    )
-    q_vec = np.array([q_res.embeddings[0].values], dtype="float32")
+    embedder = load_embedder()
+    q_vec = embedder.encode([prompt], convert_to_numpy=True).astype("float32")
     _, indices = index.search(q_vec, k=min(6, len(chunks)))
     
     retrieved_context = "\n\n---\n\n".join([chunks[i] for i in indices[0]])
@@ -96,7 +76,7 @@ if prompt := st.chat_input("e.g., What is the trip logic or terminal number for 
     system_prompt = (
         "You are a strict Testing & Commissioning (T&C) Field Engineering Assistant. "
         "Answer questions ONLY using the provided SOPs, manuals, and drawing extracts below. "
-        "Always cite the exact Document Name and Page Number (e.g.,). "
+        "Always cite the exact Document Name and Page Number. "
         "Present step-by-step procedures clearly using numbered lists. "
         "SAFETY RULE: If the exact value, terminal number, or procedure is NOT explicitly present in the context, "
         "state clearly: 'This information is not found in the uploaded T&C documents.' Never guess or assume."
