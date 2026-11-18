@@ -2,7 +2,8 @@ streamlit
 google-genai
 google-api-python-client
 google-auth
-pypdf
+pymupdf
 faiss-cpu
 numpy
 Pillow
+openpyxl
