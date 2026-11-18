@@ -41,6 +41,53 @@ def chunk_text(text, source_label, chunk_size=2000, overlap=250):
             out.append(f"[{source_label}]\n{c}")
     return out
 
+def collect_all_files(service, root_folder_ids):
+    """Recursively collects all files across multiple folders and all nested subfolders."""
+    collected_files = []
+    folders_to_visit = list(root_folder_ids)
+    visited_folders = set()
+
+    while folders_to_visit:
+        current_folder = folders_to_visit.pop(0)
+        if current_folder in visited_folders:
+            continue
+        visited_folders.add(current_folder)
+
+        page_token = None
+        while True:
+            query = f"'{current_folder}' in parents and trashed = false"
+            results = service.files().list(
+                q=query,
+                fields="nextPageToken, files(id, name, mimeType, modifiedTime, shortcutDetails)",
+                pageSize=100,
+                pageToken=page_token,
+                includeItemsFromAllDrives=True,
+                supportsAllDrives=True
+            ).execute()
+
+            for item in results.get('files', []):
+                # Follow Drive shortcuts if you added a shortcut to a public folder/file
+                if item['mimeType'] == 'application/vnd.google-apps.shortcut':
+                    target_id = item.get('shortcutDetails', {}).get('targetId')
+                    target_mime = item.get('shortcutDetails', {}).get('targetMimeType', '')
+                    if target_id:
+                        if target_mime == 'application/vnd.google-apps.folder':
+                            folders_to_visit.append(target_id)
+                        else:
+                            item['id'] = target_id
+                            item['mimeType'] = target_mime
+                            collected_files.append(item)
+                elif item['mimeType'] == 'application/vnd.google-apps.folder':
+                    folders_to_visit.append(item['id'])
+                else:
+                    collected_files.append(item)
+
+            page_token = results.get('nextPageToken')
+            if not page_token:
+                break
+
+    return collected_files
+
 def fetch_and_chunk_files(folder_id, progress_callback=None, chunk_size=2000, overlap=250):
     service = get_drive_service()
     
@@ -52,20 +99,8 @@ def fetch_and_chunk_files(folder_id, progress_callback=None, chunk_size=2000, ov
         except Exception:
             cache = {}
 
-    files = []
-    page_token = None
-    while True:
-        query = f"'{folder_id}' in parents and trashed = false"
-        results = service.files().list(
-            q=query,
-            fields="nextPageToken, files(id, name, mimeType, modifiedTime)",
-            pageSize=100,
-            pageToken=page_token
-        ).execute()
-        files.extend(results.get('files', []))
-        page_token = results.get('nextPageToken')
-        if not page_token:
-            break
+    root_ids = [fid.strip() for fid in folder_id.split(",") if fid.strip()]
+    files = collect_all_files(service, root_ids)
 
     all_chunks = []
     updated_cache = {}
@@ -126,29 +161,4 @@ def fetch_and_chunk_files(folder_id, progress_callback=None, chunk_size=2000, ov
                     if page_text:
                         file_chunks.extend(chunk_text(page_text, f"Source: {name} | Page {page_num}", chunk_size, overlap))
 
-            # 5. Standalone Drawings / Images (PNG/JPG)
-            elif mime.startswith('image/'):
-                fh = download_bytes(service, file_id)
-                img = Image.open(fh)
-                desc = pytesseract.image_to_string(img).strip()
-                if desc:
-                    file_chunks.extend(chunk_text(desc, f"Source Drawing: {name}", chunk_size, overlap))
-
-            # 6. Plain Text / CSV
-            elif mime.startswith('text/'):
-                text = download_bytes(service, file_id).getvalue().decode('utf-8')
-                file_chunks.extend(chunk_text(text, f"Source: {name}", chunk_size, overlap))
-
-            updated_cache[file_id] = {"modifiedTime": mod_time, "chunks": file_chunks}
-            all_chunks.extend(file_chunks)
-
-        except Exception as e:
-            print(f"Skipping {name}: {e}")
-
-    try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(updated_cache, f)
-    except Exception:
-        pass
-
-    return all_chunks
+            # 5. Standalone Drawings
