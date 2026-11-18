@@ -3,6 +3,7 @@ import numpy as np
 import faiss
 import streamlit as st
 from google import genai
+from google.genai import types
 from sentence_transformers import SentenceTransformer
 from drive_sync import fetch_and_chunk_files
 
@@ -11,12 +12,37 @@ st.title("⚡ Testing & Commissioning Assistant")
 st.caption("Ask questions about SOPs, Relay Settings, Procedures, and Electrical Drawings.")
 
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
-client = genai.Client(api_key=api_key)
+# Disable slow automatic retries so invalid model names fail in 0.2s instead of 30s
+client = genai.Client(
+    api_key=api_key,
+    http_options=types.HttpOptions(retry_options=types.HttpRetryOptions(attempts=1))
+)
 FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
 
 @st.cache_resource(show_spinner=False)
 def load_embedder():
     return SentenceTransformer("all-MiniLM-L6-v2")
+
+@st.cache_resource(show_spinner=False)
+def get_active_model():
+    # Automatically finds the exact working Flash model on your API key once at startup
+    candidates = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
+    try:
+        for m in client.models.list():
+            name = m.name.replace("models/", "")
+            if "flash" in name.lower() and not any(x in name.lower() for x in ["image", "audio", "tts", "thinking", "exp"]):
+                if name not in candidates:
+                    candidates.append(name)
+    except Exception:
+        pass
+
+    for model_name in candidates:
+        try:
+            client.models.generate_content(model=model_name, contents="ok")
+            return model_name, None
+        except Exception as e:
+            last_err = str(e)
+    return None, last_err
 
 @st.cache_resource(show_spinner=False)
 def build_vector_index():
@@ -45,6 +71,11 @@ with st.sidebar:
         st.cache_resource.clear()
         st.rerun()
 
+active_model, model_err = get_active_model()
+if not active_model:
+    st.error(f"Could not connect to a Gemini model. Error: {model_err}")
+    st.stop()
+
 try:
     index, chunks = build_vector_index()
 except Exception as e:
@@ -67,54 +98,30 @@ if prompt := st.chat_input("e.g., What is the trip logic or terminal number for 
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    embedder = load_embedder()
-    q_vec = embedder.encode([prompt], convert_to_numpy=True).astype("float32")
-    _, indices = index.search(q_vec, k=min(5, len(chunks)))
-    
-    retrieved_context = "\n\n---\n\n".join([chunks[i] for i in indices[0]])
-
-    system_prompt = (
-        "You are a strict Testing & Commissioning (T&C) Field Engineering Assistant. "
-        "Answer questions ONLY using the provided SOPs, manuals, and drawing extracts below. "
-        "Always cite the exact Document Name and Page Number. "
-        "Present step-by-step procedures clearly using numbered lists. "
-        "SAFETY RULE: If the exact value, terminal number, or procedure is NOT explicitly present in the context, "
-        "state clearly: 'This information is not found in the uploaded T&C documents.' Never guess or assume."
-    )
-    full_prompt = f"{system_prompt}\n\nCONTEXT:\n{retrieved_context}\n\nENGINEER'S QUESTION: {prompt}"
-
     with st.chat_message("assistant"):
-        answer_text = None
-        last_error = None
-        models_to_try = ["gemini-3.8-flash", "gemini-3.5-flash", "gemini-3.0-flash", "gemini-2.5-flash"]
-        for model_name in models_to_try:
+        with st.spinner("Searching T&C documents..."):
+            embedder = load_embedder()
+            q_vec = embedder.encode([prompt], convert_to_numpy=True).astype("float32")
+            _, indices = index.search(q_vec, k=min(5, len(chunks)))
+            
+            retrieved_context = "\n\n---\n\n".join([chunks[i] for i in indices[0]])
+
+            system_prompt = (
+                "You are a strict Testing & Commissioning (T&C) Field Engineering Assistant. "
+                "Answer questions ONLY using the provided SOPs, manuals, and drawing extracts below. "
+                "Always cite the exact Document Name and Page Number. "
+                "Present step-by-step procedures clearly using numbered lists. "
+                "SAFETY RULE: If the exact value, terminal number, or procedure is NOT explicitly present in the context, "
+                "state clearly: 'This information is not found in the uploaded T&C documents.' Never guess or assume."
+            )
+            full_prompt = f"{system_prompt}\n\nCONTEXT:\n{retrieved_context}\n\nENGINEER'S QUESTION: {prompt}"
+
             try:
                 response = client.models.generate_content(
-                    model=model_name,
+                    model=active_model,
                     contents=full_prompt
                 )
-                answer_text = response.text
-                break
+                st.markdown(response.text)
+                st.session_state.messages.append({"role": "assistant", "content": response.text})
             except Exception as e:
-                last_error = e
-                continue
-
-        if not answer_text:
-            try:
-                for m in client.models.list():
-                    if "flash" in m.name.lower() and "image" not in m.name.lower() and "audio" not in m.name.lower():
-                        clean_name = m.name.replace("models/", "")
-                        response = client.models.generate_content(
-                            model=clean_name,
-                            contents=full_prompt
-                        )
-                        answer_text = response.text
-                        break
-            except Exception as e:
-                last_error = e
-
-        if answer_text:
-            st.markdown(answer_text)
-            st.session_state.messages.append({"role": "assistant", "content": answer_text})
-        else:
-            st.error(f"Gemini API Error: {last_error}")
+                st.error(f"API Error ({active_model}): {e}")
