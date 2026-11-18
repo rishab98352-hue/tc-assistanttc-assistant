@@ -66,7 +66,6 @@ def collect_all_files(service, root_folder_ids):
             ).execute()
 
             for item in results.get('files', []):
-                # Follow Drive shortcuts if you added a shortcut to a public folder/file
                 if item['mimeType'] == 'application/vnd.google-apps.shortcut':
                     target_id = item.get('shortcutDetails', {}).get('targetId')
                     target_mime = item.get('shortcutDetails', {}).get('targetMimeType', '')
@@ -161,4 +160,29 @@ def fetch_and_chunk_files(folder_id, progress_callback=None, chunk_size=2000, ov
                     if page_text:
                         file_chunks.extend(chunk_text(page_text, f"Source: {name} | Page {page_num}", chunk_size, overlap))
 
-            # 5. Standalone Drawings
+            # 5. Standalone Drawings / Images (PNG/JPG)
+            elif mime.startswith('image/'):
+                fh = download_bytes(service, file_id)
+                img = Image.open(fh)
+                desc = pytesseract.image_to_string(img).strip()
+                if desc:
+                    file_chunks.extend(chunk_text(desc, f"Source Drawing: {name}", chunk_size, overlap))
+
+            # 6. Plain Text / CSV
+            elif mime.startswith('text/'):
+                text = download_bytes(service, file_id).getvalue().decode('utf-8')
+                file_chunks.extend(chunk_text(text, f"Source: {name}", chunk_size, overlap))
+
+            updated_cache[file_id] = {"modifiedTime": mod_time, "chunks": file_chunks}
+            all_chunks.extend(file_chunks)
+
+        except Exception as e:
+            print(f"Skipping {name}: {e}")
+
+    try:
+        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+            json.dump(updated_cache, f)
+    except Exception:
+        pass
+
+    return all_chunks
