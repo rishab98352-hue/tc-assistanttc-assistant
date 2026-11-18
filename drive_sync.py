@@ -147,16 +147,18 @@ def fetch_and_chunk_files(folder_id, progress_callback=None, chunk_size=2000, ov
                     if sheet_text:
                         file_chunks.extend(chunk_text(sheet_text, f"Source Excel: {name} | Tab: {sheet_name}", chunk_size, overlap))
 
-            # 4. PDFs (Digital Text + Local Tesseract OCR for Scanned Pages)
+          # 4. PDFs (Fast Digital Text + Capped 100-DPI OCR for Scanned Pages)
             elif mime == 'application/pdf':
                 fh = download_bytes(service, file_id)
                 doc = fitz.open(stream=fh.read(), filetype="pdf")
+                ocr_pages_used = 0
                 for page_num, page in enumerate(doc, start=1):
                     page_text = page.get_text().strip()
-                    if len(page_text) < 40:
-                        pix = page.get_pixmap(dpi=150)
+                    if len(page_text) < 40 and ocr_pages_used < 15:
+                        pix = page.get_pixmap(dpi=100)
                         img = Image.open(io.BytesIO(pix.tobytes("png")))
                         page_text = pytesseract.image_to_string(img).strip()
+                        ocr_pages_used += 1
                     if page_text:
                         file_chunks.extend(chunk_text(page_text, f"Source: {name} | Page {page_num}", chunk_size, overlap))
 
