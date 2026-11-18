@@ -48,7 +48,7 @@ with st.sidebar:
 try:
     index, chunks = build_vector_index()
 except Exception as e:
-    st.error(f"Error details: {e}")
+    st.error(f"Index Error details: {e}")
     st.stop()
 
 if not chunks:
@@ -69,7 +69,7 @@ if prompt := st.chat_input("e.g., What is the trip logic or terminal number for 
 
     embedder = load_embedder()
     q_vec = embedder.encode([prompt], convert_to_numpy=True).astype("float32")
-    _, indices = index.search(q_vec, k=min(6, len(chunks)))
+    _, indices = index.search(q_vec, k=min(5, len(chunks)))
     
     retrieved_context = "\n\n---\n\n".join([chunks[i] for i in indices[0]])
 
@@ -84,9 +84,23 @@ if prompt := st.chat_input("e.g., What is the trip logic or terminal number for 
     full_prompt = f"{system_prompt}\n\nCONTEXT:\n{retrieved_context}\n\nENGINEER'S QUESTION: {prompt}"
 
     with st.chat_message("assistant"):
-        response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=full_prompt
-        )
-        st.markdown(response.text)
-        st.session_state.messages.append({"role": "assistant", "content": response.text})
+        answer_text = None
+        last_error = None
+        # Try primary model, then automatically fall back if free-tier quota or model name differs
+        for model_name in ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash"]:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=full_prompt
+                )
+                answer_text = response.text
+                break
+            except Exception as e:
+                last_error = e
+                continue
+
+        if answer_text:
+            st.markdown(answer_text)
+            st.session_state.messages.append({"role": "assistant", "content": answer_text})
+        else:
+            st.error(f"Gemini API Error: {last_error}")
