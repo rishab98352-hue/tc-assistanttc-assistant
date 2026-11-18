@@ -11,6 +11,9 @@ st.set_page_config(page_title="T&C Field Assistant", page_icon="⚡", layout="ce
 st.title("⚡ Testing & Commissioning Assistant")
 st.caption("Ask questions about SOPs, Relay Settings, Procedures, and Electrical Drawings.")
 
+# Render the search bar FIRST so it is always immediately visible
+prompt = st.chat_input("e.g., What is the trip logic or terminal number for 86 lockout relay?")
+
 api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 client = genai.Client(
     api_key=api_key,
@@ -24,7 +27,7 @@ def load_embedder():
 
 @st.cache_resource(show_spinner=False)
 def get_active_model():
-    candidates = ["gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-3.8-flash"]
+    candidates = ["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
     try:
         for m in client.models.list():
             name = m.name.replace("models/", "")
@@ -50,4 +53,4 @@ def build_vector_index():
     def update_progress(pct, msg):
         progress_bar.progress(min(pct * 0.75, 0.75), text=msg)
 
-    chunks
+    chunks = fetch_and_chunk
