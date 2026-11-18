@@ -14,25 +14,33 @@ api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 client = genai.Client(api_key=api_key)
 FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
 
-@st.cache_resource(show_spinner="Syncing T&C documents & drawings from Google Drive...")
+@st.cache_resource(show_spinner="Syncing & indexing T&C documents (this takes ~1 min on first boot)...")
 def build_vector_index():
-    chunks = fetch_and_chunk_files(FOLDER_ID, client)
+    # Larger chunk_size (2000) reduces total chunks by half while keeping full SOP context
+    chunks = fetch_and_chunk_files(FOLDER_ID, client, chunk_size=2000, overlap=250)
     if not chunks:
         return None, []
     
-    # Embed in batches of 50 to stay well within free-tier rate limits
     embeddings = []
-    batch_size = 50
+    batch_size = 40  # Stays safely under the 100 chunks/min free-tier quota
     for i in range(0, len(chunks), batch_size):
         batch = chunks[i:i + batch_size]
-        res = client.models.embed_content(
-            model="gemini-embedding-001",
-            contents=batch
-        )
-        for emb in res.embeddings:
-            embeddings.append(emb.values)
+        while True:
+            try:
+                res = client.models.embed_content(
+                    model="gemini-embedding-001",
+                    contents=batch
+                )
+                for emb in res.embeddings:
+                    embeddings.append(emb.values)
+                break
+            except Exception as e:
+                if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                    time.sleep(60)  # Wait for the 1-minute free-tier window to reset, then resume
+                else:
+                    raise e
         if i + batch_size < len(chunks):
-            time.sleep(2)
+            time.sleep(30)
     
     matrix = np.array(embeddings, dtype="float32")
     index = faiss.IndexFlatL2(matrix.shape[1])
