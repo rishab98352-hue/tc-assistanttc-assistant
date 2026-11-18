@@ -7,3 +7,5 @@ faiss-cpu
 numpy
 Pillow
 openpyxl
+pytesseract
+sentence-transformers
