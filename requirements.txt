@@ -1,0 +1,8 @@
+streamlit
+google-genai
+google-api-python-client
+google-auth
+pypdf
+faiss-cpu
+numpy
+Pillow
