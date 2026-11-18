@@ -34,21 +34,21 @@ def download_bytes(service, file_id, export_mime=None):
     fh.seek(0)
     return fh
 
-def extract_with_vision(gemini_client, img, prompt_text):
+def extract_with_vision(gemini_client, contents_list):
     while True:
         try:
             res = gemini_client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=[img, prompt_text]
+                contents=contents_list
             )
             return (res.text or "").strip()
         except Exception as e:
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                time.sleep(60)
+                time.sleep(30)
             else:
                 raise e
 
-def chunk_text(text, source_label, chunk_size=2000, overlap=250):
+def chunk_text(text, source_label, chunk_size=2500, overlap=250):
     out = []
     for i in range(0, len(text), chunk_size - overlap):
         c = text[i:i + chunk_size].strip()
@@ -56,7 +56,7 @@ def chunk_text(text, source_label, chunk_size=2000, overlap=250):
             out.append(f"[{source_label}]\n{c}")
     return out
 
-def fetch_and_chunk_files(folder_id, gemini_client, chunk_size=2000, overlap=250):
+def fetch_and_chunk_files(folder_id, gemini_client, progress_callback=None, chunk_size=2500, overlap=250):
     service = get_drive_service()
     
     cache = {}
@@ -84,12 +84,16 @@ def fetch_and_chunk_files(folder_id, gemini_client, chunk_size=2000, overlap=250
 
     all_chunks = []
     updated_cache = {}
+    total_files = len(files)
 
-    for file in files:
+    for idx, file in enumerate(files, start=1):
         file_id = file['id']
         name = file['name']
         mime = file['mimeType']
         mod_time = file.get('modifiedTime', '')
+
+        if progress_callback:
+            progress_callback(idx / max(total_files, 1), f"Reading ({idx}/{total_files}): {name}")
 
         if file_id in cache and cache[file_id].get("modifiedTime") == mod_time:
             file_chunks = cache[file_id]["chunks"]
@@ -124,24 +128,48 @@ def fetch_and_chunk_files(folder_id, gemini_client, chunk_size=2000, overlap=250
                     if sheet_text:
                         file_chunks.extend(chunk_text(sheet_text, f"Source Excel: {name} | Tab: {sheet_name}", chunk_size, overlap))
 
-            # 4. PDFs (Digital Text + Automatic Vision OCR for Scanned Pages/Drawings)
+            # 4. PDFs (Fast text extraction + Batched 5-page Vision OCR for scanned pages)
             elif mime == 'application/pdf':
                 fh = download_bytes(service, file_id)
                 doc = fitz.open(stream=fh.read(), filetype="pdf")
+                scanned_batch = []
+                scanned_page_nums = []
+
                 for page_num, page in enumerate(doc, start=1):
                     page_text = page.get_text().strip()
-                    if len(page_text) < 40:
-                        pix = page.get_pixmap(dpi=150)
-                        img = Image.open(io.BytesIO(pix.tobytes("png")))
-                        page_text = extract_with_vision(
-                            gemini_client,
-                            img,
-                            "Transcribe all text, tables, SOP steps, component labels, relay ANSI codes, "
-                            "and terminal numbers from this scanned engineering page in clean structured text."
-                        )
-                        time.sleep(4)
-                    if page_text:
+                    if len(page_text) >= 40:
                         file_chunks.extend(chunk_text(page_text, f"Source: {name} | Page {page_num}", chunk_size, overlap))
+                    else:
+                        pix = page.get_pixmap(dpi=120)
+                        img = Image.open(io.BytesIO(pix.tobytes("png")))
+                        scanned_batch.append(img)
+                        scanned_page_nums.append(page_num)
+
+                        # Process 5 scanned pages in ONE API call
+                        if len(scanned_batch) == 5 or page_num == len(doc):
+                            if progress_callback:
+                                progress_callback(idx / max(total_files, 1), f"OCR scanning {name} (Pages {scanned_page_nums[0]}-{scanned_page_nums[-1]}/{len(doc)})...")
+                            prompt = (
+                                f"Transcribe all text, tables, SOP steps, relay ANSI codes, and terminal numbers from these "
+                                f"scanned engineering pages (Pages {scanned_page_nums}) in clean structured text."
+                            )
+                            ocr_text = extract_with_vision(gemini_client, scanned_batch + [prompt])
+                            if ocr_text:
+                                page_label = f"Pages {scanned_page_nums[0]}-{scanned_page_nums[-1]}" if len(scanned_page_nums) > 1 else f"Page {scanned_page_nums[0]}"
+                                file_chunks.extend(chunk_text(ocr_text, f"Source: {name} | {page_label}", chunk_size, overlap))
+                            scanned_batch = []
+                            scanned_page_nums = []
+
+                # Flush any remaining pages at end of PDF
+                if scanned_batch:
+                    prompt = (
+                        f"Transcribe all text, tables, SOP steps, relay ANSI codes, and terminal numbers from these "
+                        f"scanned engineering pages (Pages {scanned_page_nums}) in clean structured text."
+                    )
+                    ocr_text = extract_with_vision(gemini_client, scanned_batch + [prompt])
+                    if ocr_text:
+                        page_label = f"Pages {scanned_page_nums[0]}-{scanned_page_nums[-1]}" if len(scanned_page_nums) > 1 else f"Page {scanned_page_nums[0]}"
+                        file_chunks.extend(chunk_text(ocr_text, f"Source: {name} | {page_label}", chunk_size, overlap))
 
             # 5. Standalone Drawings / Schematics saved as Images (PNG/JPG)
             elif mime.startswith('image/'):
@@ -149,11 +177,8 @@ def fetch_and_chunk_files(folder_id, gemini_client, chunk_size=2000, overlap=250
                 img = Image.open(fh)
                 desc = extract_with_vision(
                     gemini_client,
-                    img,
-                    "Extract all technical text, component labels, relay ANSI codes, terminal block numbers, "
-                    "wiring connections, voltage ratings, and notes from this engineering drawing in structured detail."
+                    [img, "Extract all technical text, component labels, relay ANSI codes, terminal block numbers, wiring connections, and notes from this drawing."]
                 )
-                time.sleep(4)
                 if desc:
                     file_chunks.extend(chunk_text(desc, f"Source Drawing: {name}", chunk_size, overlap))
 
