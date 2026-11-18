@@ -1,4 +1,5 @@
 import os
+import time
 import numpy as np
 import faiss
 import streamlit as st
@@ -9,8 +10,9 @@ st.set_page_config(page_title="T&C Field Assistant", page_icon="⚡", layout="ce
 st.title("⚡ Testing & Commissioning Assistant")
 st.caption("Ask questions about SOPs, Relay Settings, Procedures, and Electrical Drawings.")
 
-client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
-FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID")
+api_key = os.environ.get("GEMINI_API_KEY", "").strip()
+client = genai.Client(api_key=api_key)
+FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
 
 @st.cache_resource(show_spinner="Syncing T&C documents & drawings from Google Drive...")
 def build_vector_index():
@@ -18,13 +20,19 @@ def build_vector_index():
     if not chunks:
         return None, []
     
+    # Embed in batches of 50 to stay well within free-tier rate limits
     embeddings = []
-    for chunk in chunks:
+    batch_size = 50
+    for i in range(0, len(chunks), batch_size):
+        batch = chunks[i:i + batch_size]
         res = client.models.embed_content(
             model="gemini-embedding-001",
-            contents=chunk
+            contents=batch
         )
-        embeddings.append(res.embeddings[0].values)
+        for emb in res.embeddings:
+            embeddings.append(emb.values)
+        if i + batch_size < len(chunks):
+            time.sleep(2)
     
     matrix = np.array(embeddings, dtype="float32")
     index = faiss.IndexFlatL2(matrix.shape[1])
@@ -37,7 +45,11 @@ with st.sidebar:
         st.cache_resource.clear()
         st.rerun()
 
-index, chunks = build_vector_index()
+try:
+    index, chunks = build_vector_index()
+except Exception as e:
+    st.error(f"API Error details: {e}")
+    st.stop()
 
 if not chunks:
     st.warning("No readable files found in your Google Drive folder. Check sharing permissions and Folder ID.")
@@ -67,7 +79,7 @@ if prompt := st.chat_input("e.g., What is the trip logic or terminal number for 
     system_prompt = (
         "You are a strict Testing & Commissioning (T&C) Field Engineering Assistant. "
         "Answer questions ONLY using the provided SOPs, manuals, and drawing extracts below. "
-        "Always cite the exact Document Name and Page Number (e.g., [Source: SOP_Relay.pdf | Page 4]). "
+        "Always cite the exact Document Name and Page Number (e.g.,). "
         "Present step-by-step procedures clearly using numbered lists. "
         "SAFETY RULE: If the exact value, terminal number, or procedure is NOT explicitly present in the context, "
         "state clearly: 'This information is not found in the uploaded T&C documents.' Never guess or assume."
