@@ -14,16 +14,24 @@ api_key = os.environ.get("GEMINI_API_KEY", "").strip()
 client = genai.Client(api_key=api_key)
 FOLDER_ID = os.environ.get("DRIVE_FOLDER_ID", "").strip()
 
-@st.cache_resource(show_spinner="Syncing & indexing T&C documents (this takes ~1 min on first boot)...")
+@st.cache_resource(show_spinner=False)
 def build_vector_index():
-    # Larger chunk_size (2000) reduces total chunks by half while keeping full SOP context
-    chunks = fetch_and_chunk_files(FOLDER_ID, client, chunk_size=2000, overlap=250)
+    progress_bar = st.progress(0, text="Connecting to Google Drive...")
+    
+    def update_progress(pct, msg):
+        progress_bar.progress(min(pct * 0.7, 0.7), text=msg)
+
+    chunks = fetch_and_chunk_files(FOLDER_ID, client, progress_callback=update_progress, chunk_size=2500, overlap=250)
     if not chunks:
+        progress_bar.empty()
         return None, []
     
     embeddings = []
-    batch_size = 40  # Stays safely under the 100 chunks/min free-tier quota
-    for i in range(0, len(chunks), batch_size):
+    batch_size = 80
+    total_chunks = len(chunks)
+    for i in range(0, total_chunks, batch_size):
+        pct = 0.7 + (0.3 * (i / max(total_chunks, 1)))
+        progress_bar.progress(min(pct, 0.99), text=f"Indexing knowledge chunks ({min(i + batch_size, total_chunks)}/{total_chunks})...")
         batch = chunks[i:i + batch_size]
         while True:
             try:
@@ -36,12 +44,13 @@ def build_vector_index():
                 break
             except Exception as e:
                 if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
-                    time.sleep(60)  # Wait for the 1-minute free-tier window to reset, then resume
+                    progress_bar.progress(min(pct, 0.99), text="Free-tier rate limit pause (waiting 30s)...")
+                    time.sleep(30)
                 else:
+                    progress_bar.empty()
                     raise e
-        if i + batch_size < len(chunks):
-            time.sleep(30)
     
+    progress_bar.empty()
     matrix = np.array(embeddings, dtype="float32")
     index = faiss.IndexFlatL2(matrix.shape[1])
     index.add(matrix)
